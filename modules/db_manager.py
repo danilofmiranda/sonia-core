@@ -835,3 +835,179 @@ class DBManager:
             self.conn.rollback()
             logger.error(f"Error completing run: {e}")
             return False
+
+    # ========== TENANT MAPPING & SPREADSHEET SYNC ==========
+
+    def sync_tenant_mapping_from_spreadsheet(
+        self,
+        tenant_names,
+        tenant_contacts
+    ):
+        """
+        Synchronize tenant mapping from spreadsheet data using UPSERT logic.
+
+        Args:
+            tenant_names: {tenant_id_int: "CLIENT NAME", ...}
+            tenant_contacts: {tenant_id_int: [{"name": "...", "whatsapp": "..."}, ...], ...}
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._ensure_connection():
+            return False
+
+        try:
+            for tenant_id, client_name in tenant_names.items():
+                whatsapp_numbers = []
+                if tenant_id in tenant_contacts:
+                    for contact in tenant_contacts[tenant_id]:
+                        if "whatsapp" in contact and contact["whatsapp"]:
+                            whatsapp_numbers.append(contact["whatsapp"])
+
+                query = """
+                INSERT INTO tenant_mapping (
+                    dynamo_tenant_id, client_name, whatsapp_numbers, is_active
+                )
+                VALUES (%s, %s, %s, TRUE)
+                ON CONFLICT (dynamo_tenant_id) DO UPDATE SET
+                    client_name = EXCLUDED.client_name,
+                    whatsapp_numbers = EXCLUDED.whatsapp_numbers,
+                    is_active = TRUE,
+                    updated_at = NOW()
+                """
+
+                whatsapp_json = Json(whatsapp_numbers)
+
+                self.cursor.execute(query, (
+                    tenant_id,
+                    client_name,
+                    whatsapp_json
+                ))
+
+            self.conn.commit()
+            logger.info(f"Synced tenant mapping for {len(tenant_names)} tenants from spreadsheet")
+            return True
+
+        except psycopg2.Error as e:
+            self.conn.rollback()
+            logger.error(f"Error syncing tenant mapping from spreadsheet: {e}")
+            return False
+
+    # ========== SHIPMENT TRACKING DELIVERY CACHE ==========
+
+    def get_delivered_tracking_set(self):
+        """
+        Get a set of all tracking numbers that have been marked as delivered.
+        Used for caching delivered shipments.
+
+        Returns:
+            Set of tracking_number strings
+        """
+        if not self._ensure_connection():
+            return set()
+
+        try:
+            query = """
+            SELECT tracking_number FROM shipments
+            WHERE is_delivered = TRUE
+            """
+
+            self.cursor.execute(query)
+            results = self.cursor.fetchall()
+
+            tracking_set = {row["tracking_number"] for row in results if row["tracking_number"]}
+            logger.debug(f"Retrieved {len(tracking_set)} delivered tracking numbers")
+            return tracking_set
+
+        except psycopg2.Error as e:
+            logger.error(f"Error getting delivered tracking set: {e}")
+            return set()
+
+    def mark_tracking_delivered(self, tracking_number):
+        """
+        Mark a shipment as delivered by tracking number.
+        If the tracking number doesn't exist, insert a new minimal record.
+        Uses UPSERT pattern.
+
+        Args:
+            tracking_number: FedEx tracking number
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._ensure_connection():
+            return False
+
+        try:
+            query = """
+            INSERT INTO shipments (tracking_number, is_delivered)
+            VALUES (%s, TRUE)
+            ON CONFLICT (tracking_number) DO UPDATE SET
+                is_delivered = TRUE,
+                updated_at = NOW()
+            """
+
+            self.cursor.execute(query, (tracking_number,))
+            self.conn.commit()
+
+            logger.debug(f"Marked tracking as delivered: {tracking_number}")
+            return True
+
+        except psycopg2.Error as e:
+            self.conn.rollback()
+            logger.error(f"Error marking tracking delivered: {e}")
+            return False
+
+    # ========== TABLE CREATION & SCHEMA INITIALIZATION ==========
+
+    def ensure_tables_exist(self):
+        """
+        Ensure that required tables exist with their basic schema.
+        Creates tenant_mapping and shipments tables if they don't exist.
+
+        Returns:
+            True if all tables exist or were created successfully, False otherwise
+        """
+        if not self._ensure_connection():
+            return False
+
+        try:
+            tenant_mapping_query = """
+            CREATE TABLE IF NOT EXISTS tenant_mapping (
+                dynamo_tenant_id INTEGER PRIMARY KEY,
+                client_id INTEGER,
+                client_name VARCHAR(255),
+                odoo_company_id INTEGER,
+                whatsapp_numbers JSONB DEFAULT '[]',
+                is_active BOOLEAN DEFAULT TRUE,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+
+            self.cursor.execute(tenant_mapping_query)
+            logger.debug("Ensured tenant_mapping table exists")
+
+            shipments_query = """
+            CREATE TABLE IF NOT EXISTS shipments (
+                id SERIAL PRIMARY KEY,
+                tracking_number VARCHAR(255) UNIQUE NOT NULL,
+                is_delivered BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+
+            self.cursor.execute(shipments_query)
+            logger.debug("Ensured shipments table exists")
+
+            self.conn.commit()
+            logger.info("All required tables verified/created successfully")
+            return True
+
+        except psycopg2.Error as e:
+            self.conn.rollback()
+            logger.error(f"Error ensuring tables exist: {e}")
+            return False
+
