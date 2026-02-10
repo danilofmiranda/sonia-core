@@ -59,6 +59,20 @@ class DBManager:
         except psycopg2.Error as e:
             logger.error(f"Error closing database connection: {e}")
 
+
+    def health_check(self) -> bool:
+        """Quick database health check."""
+        try:
+            conn = psycopg2.connect(self.database_url)
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+
     def _ensure_connection(self) -> bool:
         """
         Ensure database connection is active; reconnect if needed.
