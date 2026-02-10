@@ -1,4 +1,4 @@
-# SonIA Core â Dependencies
+# SonIA Core — Dependencies
 # BloomsPal
 
 # Web Framework (for health endpoint + cron trigger)
