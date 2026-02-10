@@ -1,5 +1,5 @@
 """
-SonIA Core â FedEx Tracking Module
+SonIA Core — FedEx Tracking Module
 Handles OAuth2 authentication, batch tracking, and status normalization.
 Uses connection pooling with httpx and exponential backoff retry logic.
 """
@@ -238,7 +238,7 @@ class FedExTracker:
 
             # Build query string
             query_params = {
-                "trackingNumberInfo": ",".join(tracking_unumbers),
+                "trackingNumberInfo": ",".join(tracking_numbers),
                 "includeDetailedScans": "true"
             }
 
@@ -336,7 +336,7 @@ class FedExTracker:
     def _request_with_retry(self, method: str, url: str, headers: Dict = None,
                            data: Dict = None, json_data: Dict = None,
                            max_retries: int = 3) -> httpx.Response:
-       """
+        """
         Make HTTP request with exponential backoff retry logic.
 
         Args:
