@@ -1,8 +1,8 @@
 """
-SonIA Core â DynamoDB Reader Module
+SonIA Core — DynamoDB Reader Module
 READ ONLY access to DynamoDB reserves table.
 
-â ï¸ CRITICAL: This module ONLY performs read operations.
+⚠️ CRITICAL: This module ONLY performs read operations.
 No writes, modifications, or deletions are allowed.
 """
 
@@ -39,7 +39,7 @@ class DynamoReader:
         Scan all items from the reserves table.
         Returns a list of parsed reserve objects.
 
-        â ï¸ READ ONLY operation (dynamodb:Scan)
+        ⚠️ READ ONLY operation (dynamodb:Scan)
         """
         logger.info(f"Starting full scan of '{self.table_name}'...")
 
