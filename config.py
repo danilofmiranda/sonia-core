@@ -1,5 +1,5 @@
 """
-SonIA Core â Configuration
+SonIA Core — Configuration
 All settings loaded from environment variables for easy migration to AWS.
 """
 
@@ -12,13 +12,13 @@ from datetime import timezone, timedelta
 COT = timezone(timedelta(hours=-5))  # Colombia Time
 
 # ============================================================================
-# DATABASE â PostgreSQL (Railway)
+# DATABASE — PostgreSQL (Railway)
 # ============================================================================
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 # Railway provides DATABASE_URL. For local dev, set manually.
 
 # ============================================================================
-# AWS â DynamoDB (READ ONLY)
+# AWS — DynamoDB (READ ONLY)
 # ============================================================================
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
