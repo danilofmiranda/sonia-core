@@ -1,4 +1,3 @@
-"""
 âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 â                    SonIA Core â Daily Tracking Orchestrator                    â
 â                              BloomsPal                                        â
@@ -19,6 +18,8 @@ Schedule: Daily at 4:00 AM COT (UTC-5)
 import logging
 import sys
 import json
+import os
+import psycopg2
 from datetime import datetime, timezone, timedelta, date
 from contextlib import asynccontextmanager
 from typing import Dict, List
@@ -58,6 +59,47 @@ COT = timezone(timedelta(hours=-5))
 scheduler = BackgroundScheduler(timezone="America/Bogota")
 
 
+def run_migration():
+    """Run SQL migration on startup if tables don't exist."""
+        database_url = os.getenv("DATABASE_URL")
+            if not database_url:
+                    logger.warning("DATABASE_URL not set, skipping migration")
+                            return
+                                
+                                    try:
+                                            conn = psycopg2.connect(database_url)
+                                                    cur = conn.cursor()
+                                                            
+                                                                    # Check if migration already ran (check if shipments table exists)
+                                                                            cur.execute("""
+                                                                                        SELECT EXISTS (
+                                                                                                        SELECT FROM information_schema.tables 
+                                                                                                                        WHERE table_name = 'shipments'
+                                                                                                                                    );
+                                                                                                                                            """)
+                                                                                                                                                    exists = cur.fetchone()[0]
+                                                                                                                                                            
+                                                                                                                                                                    if exists:
+                                                                                                                                                                                logger.info("Database tables already exist, skipping migration")
+                                                                                                                                                                                            cur.close()
+                                                                                                                                                                                                        conn.close()
+                                                                                                                                                                                                                    return
+                                                                                                                                                                                                                            
+                                                                                                                                                                                                                                    # Read and execute migration file
+                                                                                                                                                                                                                                            migration_path = os.path.join(os.path.dirname(__file__), "migrations", "001_initial_schema.sql")
+                                                                                                                                                                                                                                                    if os.path.exists(migration_path):
+                                                                                                                                                                                                                                                                with open(migration_path, "r") as f:
+                                                                                                                                                                                                                                                                                sql = f.read()
+                                                                                                                                                                                                                                                                                            cur.execute(sql)
+                                                                                                                                                                                                                                                                                                        conn.commit()
+                                                                                                                                                                                                                                                                                                                    logger.info("Migration 001_initial_schema.sql executed successfully!")
+                                                                                                                                                                                                                                                                                                                            else:
+                                                                                                                                                                                                                                                                                                                                        logger.warning(f"Migration file not found: {migration_path}")
+                                                                                                                                                                                                                                                                                                                                                
+                                                                                                                                                                                                                                                                                                                                                        cur.close()
+                                                                                                                                                                                                                                                                                                                                                                conn.close()
+                                                                                                                                                                                                                                                                                                                                                                    except Exception as e:
+                                                                                                                                                                                                                                                                                                                                                                            logger.error(f"Migration failed: {e}")
 # ============================================================================
 # DAILY FLOW ORCHESTRATOR
 # ============================================================================
@@ -432,6 +474,7 @@ def _send_failure_alert(message: str):
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     # Startup: start scheduler
+        run_migration()
     scheduler.add_job(
         run_daily_flow,
         CronTrigger(hour=config.CRON_HOUR, minute=config.CRON_MINUTE),
