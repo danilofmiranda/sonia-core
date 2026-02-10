@@ -1,5 +1,5 @@
 """
-SonIA Core â Anomaly Detector Module (Part C)
+SonIA Core — Anomaly Detector Module (Part C)
 Detects shipment anomalies and creates proactive claims.
 
 Detection Rules:
@@ -73,7 +73,7 @@ class AnomalyDetector:
                 "rule": "exception_detected",
                 "tracking_number": tracking,
                 "claim_type": "otro",
-                "description": f"FedEx reportÃ³ una excepciÃ³n de entrega. Estado: {shipment.get('fedex_status', 'N/A')}",
+                "description": f"FedEx reportó una excepción de entrega. Estado: {shipment.get('fedex_status', 'N/A')}",
                 "severity": "high",
             })
 
@@ -88,7 +88,7 @@ class AnomalyDetector:
                         "rule": "transit_too_long",
                         "tracking_number": tracking,
                         "claim_type": "entrega_tardia",
-                        "description": f"Paquete en trÃ¡nsito por {business_days} dÃ­as hÃ¡biles (umbral: {threshold}). Enviado: {ship_date.strftime('%Y-%m-%d')}",
+                        "description": f"Paquete en tránsito por {business_days} días hábiles (umbral: {threshold}). Enviado: {ship_date.strftime('%Y-%m-%d')}",
                         "severity": "medium",
                     })
 
@@ -113,7 +113,7 @@ class AnomalyDetector:
                         "rule": "delivery_attempted_stuck",
                         "tracking_number": tracking,
                         "claim_type": "no_entregado",
-                        "description": f"Intento de entrega sin Ã©xito por {days_stuck} dÃ­as (umbral: {threshold})",
+                        "description": f"Intento de entrega sin éxito por {days_stuck} días (umbral: {threshold})",
                         "severity": "medium",
                     })
 
@@ -128,7 +128,7 @@ class AnomalyDetector:
                         "rule": "customs_too_long",
                         "tracking_number": tracking,
                         "claim_type": "entrega_tardia",
-                        "description": f"Paquete en aduanas por {business_days} dÃ­as hÃ¡biles (umbral: {threshold})",
+                        "description": f"Paquete en aduanas por {business_days} días hábiles (umbral: {threshold})",
                         "severity": "medium",
                     })
 
@@ -143,7 +143,7 @@ class AnomalyDetector:
                         "rule": "label_no_movement",
                         "tracking_number": tracking,
                         "claim_type": "otro",
-                        "description": f"Label creada hace {days_since} dÃ­as sin movimiento (umbral: {threshold}). Label: {label_date.strftime('%Y-%m-%d')}",
+                        "description": f"Label creada hace {days_since} días sin movimiento (umbral: {threshold}). Label: {label_date.strftime('%Y-%m-%d')}",
                         "severity": "low",
                     })
 
