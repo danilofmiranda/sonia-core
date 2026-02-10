@@ -469,3 +469,137 @@ async def get_stats():
         return latest_run if latest_run else {"message": "No runs yet"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ADMIN ENDPOINTS (temporal - para setup inicial)
+# ============================================================================
+
+@app.get("/admin/dynamo-scan")
+async def admin_dynamo_scan():
+    """Scan DynamoDB to see sample records and identify tenant IDs."""
+    dynamo = modules.get("dynamo")
+    if not dynamo:
+        raise HTTPException(status_code=503, detail="DynamoDB not available")
+    
+    try:
+        # Use the client directly to scan
+        response = dynamo.client.scan(
+            TableName=dynamo.table_name,
+            Limit=10
+        )
+        items = response.get("Items", [])
+        return {
+            "table": dynamo.table_name,
+            "count": response.get("Count", 0),
+            "scanned": response.get("ScannedCount", 0),
+            "items": items
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/seed-data")
+async def admin_seed_data():
+    """Seed initial BloomsPal client and tenant_mapping data."""
+    db = modules.get("db")
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        db.connect()
+        
+        # 1. Insert BloomsPal client
+        db.cursor.execute("""
+            INSERT INTO clients (name, dynamo_name, dynamo_tenant_id, is_active)
+            VALUES ('BloomsPal', 'BloomsPal', 1, TRUE)
+            ON CONFLICT DO NOTHING
+            RETURNING id
+        """)
+        result = db.cursor.fetchone()
+        client_id = result["id"] if result else None
+        
+        if not client_id:
+            db.cursor.execute("SELECT id FROM clients WHERE name = 'BloomsPal'")
+            result = db.cursor.fetchone()
+            client_id = result["id"] if result else None
+        
+        # 2. Insert tenant_mapping
+        db.cursor.execute("""
+            INSERT INTO tenant_mapping (dynamo_tenant_id, client_id, client_name, whatsapp_numbers, is_active, notes)
+            VALUES (
+                1,
+                %s,
+                'BloomsPal',
+                ARRAY['573142285386', '573105870328', '573108507879'],
+                TRUE,
+                'Carlos Miranda (Carl), Danny Miranda, Andrea Ayala - desde WHATSAPP BBDD Odoo'
+            )
+            ON CONFLICT (dynamo_tenant_id) DO UPDATE SET
+                whatsapp_numbers = EXCLUDED.whatsapp_numbers,
+                notes = EXCLUDED.notes,
+                updated_at = NOW()
+            RETURNING id
+        """, (client_id,))
+        
+        mapping = db.cursor.fetchone()
+        
+        # 3. Insert client_contacts
+        contacts = [
+            ('Carlos Miranda', 'Carl', '573142285386', 'cliente'),
+            ('Danilo Miranda de la Espriella', 'Danny', '573105870328', 'cliente'),
+            ('Andrea Ayala', 'Andrea', '573108507879', 'cliente'),
+        ]
+        
+        for full_name, nickname, phone, role in contacts:
+            db.cursor.execute("""
+                INSERT INTO client_contacts (client_id, full_name, nickname, whatsapp_number, role, is_active)
+                VALUES (%s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT DO NOTHING
+            """, (client_id, full_name, nickname, phone, role))
+        
+        db.conn.commit()
+        db.close()
+        
+        return {
+            "status": "success",
+            "client_id": client_id,
+            "tenant_mapping_id": mapping["id"] if mapping else "already existed",
+            "contacts_added": len(contacts),
+            "whatsapp_numbers": ['573142285386', '573105870328', '573108507879']
+        }
+    except Exception as e:
+        if db.conn:
+            db.conn.rollback()
+        db.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/db-status")
+async def admin_db_status():
+    """Check database tables and record counts."""
+    db = modules.get("db")
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    try:
+        db.connect()
+        tables = ['clients', 'tenant_mapping', 'client_contacts', 'shipments', 'claims', 'daily_run_logs']
+        counts = {}
+        for table in tables:
+            db.cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
+            result = db.cursor.fetchone()
+            counts[table] = result["count"] if result else 0
+        
+        # Get tenant_mapping details
+        db.cursor.execute("SELECT * FROM tenant_mapping")
+        mappings = db.cursor.fetchall()
+        
+        db.close()
+        return {
+            "table_counts": counts,
+            "tenant_mappings": [dict(m) for m in mappings] if mappings else []
+        }
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=str(e))
