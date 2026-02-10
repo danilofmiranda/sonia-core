@@ -134,9 +134,9 @@ def init_modules():
     # DynamoDB Reader
     if config.AWS_ACCESS_KEY_ID:
         modules["dynamo"] = DynamoReader(
-            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
-            region_name=config.AWS_REGION,
+            aws_access_key=config.AWS_ACCESS_KEY_ID,
+            aws_secret_key=config.AWS_SECRET_ACCESS_KEY,
+            region=config.AWS_REGION,
             table_name=config.DYNAMO_TABLE,
         )
         logger.info("DynamoReader initialized")
@@ -144,8 +144,8 @@ def init_modules():
     # FedEx Tracker
     if config.FEDEX_API_KEY:
         modules["fedex"] = FedExTracker(
-            api_key=config.FEDEX_API_KEY,
-            secret_key=config.FEDEX_SECRET_KEY,
+            client_id=config.FEDEX_API_KEY,
+            client_secret=config.FEDEX_SECRET_KEY,
             account_number=config.FEDEX_ACCOUNT,
         )
         logger.info("FedExTracker initialized")
