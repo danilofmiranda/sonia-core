@@ -1,5 +1,5 @@
 """
-SonIA Core â Odoo Client Module
+SonIA Core — Odoo Client Module
 Queries Odoo for client contacts to send WhatsApp reports.
 """
 
