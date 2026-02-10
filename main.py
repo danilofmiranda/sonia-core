@@ -291,7 +291,7 @@ async def daily_flow(modules: dict):
         raw_shipments = []
         if dynamo:
             try:
-                raw_shipments = dynamo.scan_all_shipments()
+                raw_shipments = dynamo.scan_all_reserves()
                 stats["total_shipments_read"] = len(raw_shipments)
                 logger.info(f"Read {len(raw_shipments)} reserves from DynamoDB")
             except Exception as e:
@@ -919,7 +919,7 @@ async def admin_test_flow(tenant_number: int = None):
 
     try:
         # Read from DynamoDB
-        raw_shipments = dynamo.scan_all_shipments()
+        raw_shipments = dynamo.scan_all_reserves()
         if not raw_shipments:
             return {"status": "no_data", "detail": "No shipments in DynamoDB"}
 
