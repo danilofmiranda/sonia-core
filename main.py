@@ -546,17 +546,17 @@ async def admin_seed_data():
         
         # 3. Insert client_contacts
         contacts = [
-            ('Carlos Miranda', 'Carl', '573142285386', 'cliente'),
-            ('Danilo Miranda de la Espriella', 'Danny', '573105870328', 'cliente'),
-            ('Andrea Ayala', 'Andrea', '573108507879', 'cliente'),
+            ('Carlos Miranda (Carl)', '573142285386'),
+            ('Danilo Miranda de la Espriella (Danny)', '573105870328'),
+            ('Andrea Ayala', '573108507879'),
         ]
         
-        for full_name, nickname, phone, role in contacts:
+        for name, phone in contacts:
             db.cursor.execute("""
-                INSERT INTO client_contacts (client_id, full_name, nickname, whatsapp_number, role, is_active)
-                VALUES (%s, %s, %s, %s, %s, TRUE)
+                INSERT INTO client_contacts (client_id, name, whatsapp_number, is_active)
+                VALUES (%s, %s, %s, TRUE)
                 ON CONFLICT DO NOTHING
-            """, (client_id, full_name, nickname, phone, role))
+            """, (client_id, name, phone))
         
         db.conn.commit()
         db.close()
