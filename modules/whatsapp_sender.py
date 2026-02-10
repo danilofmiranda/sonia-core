@@ -1,5 +1,5 @@
 """
-SonIA Core â WhatsApp Sender Module
+SonIA Core — WhatsApp Sender Module
 Sends reports and alerts through SonIA Agent's API.
 """
 
@@ -72,7 +72,7 @@ class WhatsAppSender:
 
     def send_alert_sync(self, phone_number: str, alert_message: str) -> bool:
         """Send an alert message to admin via WhatsApp (synchronous)."""
-        return self.send_message_sync(phone_number, f"ð¨ *ALERTA SonIA Tracker*\n\n {alert_message}")
+        return self.send_message_sync(phone_number, f"🚨 *ALERTA SonIA Tracker*\n\n{alert_message}")
 
     async def close(self):
         if self._client and not self._client.is_closed:
