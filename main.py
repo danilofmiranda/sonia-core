@@ -11,9 +11,8 @@ Runs daily at 4:00 AM COT (UTC-5):
 6. Generate per-client reports
 7. Send reports via WhatsApp (through SonIA Agent)
 
-Error handling: ALL errors are notified to admin via WhatsApp.
+Error handling: ALL errors are notified to admin via WhatsApp
 """
-
 import os
 import logging
 import traceback
@@ -869,6 +868,8 @@ async def admin_sync_tenants(data: Dict[str, Any]):
                     db.cursor.execute("""
                         INSERT INTO clients (name, dynamo_tenant_id, is_active)
                         VALUES (%s, %s, TRUE)
+                        ON CONFLICT (dynamo_tenant_id) DO UPDATE
+                        SET name = EXCLUDED.name
                         RETURNING id
                     """, (tenant_name, tenant_id))
                     result = db.cursor.fetchone()
