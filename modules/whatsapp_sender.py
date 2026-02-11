@@ -74,6 +74,34 @@ class WhatsAppSender:
         """Send an alert message to admin via WhatsApp (synchronous)."""
         return self.send_message_sync(phone_number, f"🚨 *ALERTA SonIA Tracker*\n\n{alert_message}")
 
+    def send_file_sync(self, phone_number: str, file_path: str, caption: str = "") -> bool:
+        """Send a file (e.g. Excel report) via WhatsApp (synchronous)."""
+        import os
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return False
+        try:
+            filename = os.path.basename(file_path)
+            with httpx.Client(timeout=60.0, headers={"X-API-Key": self.api_key}) as client:
+                with open(file_path, "rb") as f:
+                    response = client.post(
+                        f"{self.agent_url}/api/send-file",
+                        data={
+                            "phone_number": phone_number,
+                            "caption": caption or filename,
+                        },
+                        files={"file": (filename, f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                    )
+                if response.status_code == 200:
+                    logger.info(f"File {filename} sent to {phone_number}")
+                    return True
+                else:
+                    logger.error(f"Failed to send file to {phone_number}: {response.status_code} {response.text}")
+                    return False
+        except Exception as e:
+            logger.error(f"Error sending file to {phone_number}: {e}")
+            return False
+
     async def close(self):
         if self._client and not self._client.is_closed:
             await self._client.aclose()
