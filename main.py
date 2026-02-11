@@ -4,7 +4,7 @@ BloomsPal / Fase 1
 
 Runs daily at 4:00 AM COT (UTC-5):
 1. Read shipments from DynamoDB
-2. Group by tenant, look up each in Odoo
+2. Group by tenant, look up each in tenant_mapping (PostgreSQL)
 3. Query FedEx Track API for status updates
 4. Store/update in PostgreSQL
 5. Detect anomalies and create proactive claims
@@ -91,6 +91,7 @@ class Config:
     ODOO_USER = os.getenv("ODOO_USER", "")
     ODOO_PASSWORD = os.getenv("ODOO_PASSWORD", "")
     ODOO_TENANT_FIELD = os.getenv("ODOO_TENANT_FIELD", "x_studio_tenant")
+    ODOO_SPREADSHEET_ID = int(os.getenv("ODOO_SPREADSHEET_ID", "114"))
     SONIA_AGENT_URL = os.getenv("SONIA_AGENT_URL", "")
     SONIA_AGENT_API_KEY = os.getenv("SONIA_AGENT_API_KEY", "")
     ADMIN_WHATSAPP = os.getenv("ADMIN_WHATSAPP", "")
@@ -165,6 +166,23 @@ def init_modules():
 
 
 # ============================================================================
+# GLOBAL FLOW PROGRESS STATE
+# ============================================================================
+
+flow_progress = {
+    "running": False,
+    "phase": "",
+    "tenant_current": "",
+    "tenant_total": 0,
+    "tenant_index": 0,
+    "packages_total": 0,
+    "packages_done": 0,
+    "started_at": None,
+    "errors": []
+}
+
+
+# ============================================================================
 # ADMIN WHATSAPP ALERT HELPERS
 # ============================================================================
 
@@ -182,7 +200,7 @@ def _send_admin_alert(whatsapp: WhatsAppSender, message: str):
 
 def _alert_tenant_not_found(whatsapp: WhatsAppSender, tenant_number: int,
                              tracking_numbers: List[str]):
-    """Alert admin: tenant exists in DynamoDB but not in Odoo."""
+    """Alert admin: tenant exists in DynamoDB but not in tenant_mapping."""
     now = datetime.now(COT).strftime("%d/%m/%Y %I:%M %p")
     guides = ", ".join(tracking_numbers[:5])
     if len(tracking_numbers) > 5:
@@ -191,27 +209,27 @@ def _alert_tenant_not_found(whatsapp: WhatsAppSender, tenant_number: int,
     msg = (
         f"\u26a0\ufe0f *SonIA Tracker \u2014 Alerta*\n\n"
         f"Tenant #{tenant_number} existe en DynamoDB pero no se "
-        f"encontro en Odoo.\n\n"
+        f"encontro en tenant_mapping.\n\n"
         f"\U0001f4e6 Guias pendientes: {len(tracking_numbers)}\n"
         f"\U0001f4cb Tracking: {guides}\n\n"
-        f'*Accion requerida:* Verificar que el campo "Tenant #" '
-        f"esta configurado correctamente en Odoo para este tenant.\n\n"
+        f'*Accion requerida:* Sincronizar este tenant usando '
+        f"POST /admin/sync-tenants para agregarlo a la base de datos.\n\n"
         f"\U0001f916 SonIA Tracker \u2014 {now}"
     )
     _send_admin_alert(whatsapp, msg)
 
 
-def _alert_no_whatsapp_contacts(whatsapp: WhatsAppSender, company_name: str,
+def _alert_no_whatsapp_contacts(whatsapp: WhatsAppSender, tenant_name: str,
                                  tenant_number: int, tracking_count: int):
-    """Alert admin: company has no WhatsApp contacts in Odoo."""
+    """Alert admin: tenant has no WhatsApp contacts in tenant_mapping."""
     now = datetime.now(COT).strftime("%d/%m/%Y %I:%M %p")
     msg = (
         f"\u26a0\ufe0f *SonIA Tracker \u2014 Alerta*\n\n"
-        f"La compania {company_name} (Tenant #{tenant_number}) "
-        f"no tiene usuarios con WhatsApp asignados en Odoo.\n\n"
+        f"El tenant {tenant_name} (#{tenant_number}) "
+        f"no tiene contactos con WhatsApp asignados.\n\n"
         f"\U0001f4e6 Guias pendientes: {tracking_count}\n\n"
-        f"*Accion requerida:* Agregar contactos con numero de "
-        f"WhatsApp a esta compania en Odoo.\n\n"
+        f"*Accion requerida:* Agregar contactos a este tenant "
+        f"usando POST /admin/sync-tenants.\n\n"
         f"\U0001f916 SonIA Tracker \u2014 {now}"
     )
     _send_admin_alert(whatsapp, msg)
@@ -242,25 +260,34 @@ def _alert_flow_error(whatsapp: WhatsAppSender, tenant_number: Optional[int],
 # DAILY ORCHESTRATION FLOW
 # ============================================================================
 
-async def daily_flow(modules: dict):
+async def run_daily_flow(modules: dict):
     """
-    Main daily orchestration with Odoo-based tenant mapping:
+    Main daily orchestration with tenant_mapping lookup:
     1. Read shipments from DynamoDB
     2. Group by tenant number
-    3. For each tenant: Odoo lookup -> FedEx tracking -> report -> WhatsApp
-    4. ALL errors are notified to admin via WhatsApp
+    3. Look up tenant info in tenant_mapping table
+    4. For each tenant: FedEx tracking -> report -> WhatsApp
+    5. ALL errors are notified to admin via WhatsApp
     """
+    global flow_progress
+
     db = modules.get("db")
     dynamo = modules.get("dynamo")
     fedex = modules.get("fedex")
     anomaly_detector = modules.get("anomaly")
     report_gen = modules.get("reports")
     whatsapp = modules.get("whatsapp")
-    odoo = modules.get("odoo")
 
     if not db:
         logger.error("DB not available, cannot run daily flow")
+        flow_progress["running"] = False
         return
+
+    # Set running flag
+    flow_progress["running"] = True
+    flow_progress["started_at"] = datetime.now(COT).isoformat()
+    flow_progress["phase"] = "initializing"
+    flow_progress["errors"] = []
 
     now = datetime.now(COT)
     logger.info(f"=== Starting daily flow at {now.strftime('%Y-%m-%d %H:%M:%S')} COT ===")
@@ -270,8 +297,8 @@ async def daily_flow(modules: dict):
     stats = {
         "total_shipments_read": 0,
         "tenants_found": 0,
-        "tenants_in_odoo": 0,
-        "tenants_missing_odoo": 0,
+        "tenants_in_mapping": 0,
+        "tenants_missing_mapping": 0,
         "tenants_no_whatsapp": 0,
         "new_shipments": 0,
         "shipments_checked": 0,
@@ -287,6 +314,7 @@ async def daily_flow(modules: dict):
 
     try:
         # ââ Step 1: Read from DynamoDB ââ
+        flow_progress["phase"] = "reading_dynamodb"
         logger.info("Step 1: Reading shipments from DynamoDB...")
         raw_shipments = []
         if dynamo:
@@ -303,6 +331,7 @@ async def daily_flow(modules: dict):
                 )
                 stats["alerts_sent"] += 1
                 db.update_run_log(run_id, stats, errors, "failed")
+                flow_progress["running"] = False
                 return
         else:
             logger.error("DynamoDB module not available")
@@ -313,14 +342,17 @@ async def daily_flow(modules: dict):
             )
             stats["alerts_sent"] += 1
             db.update_run_log(run_id, stats, errors, "failed")
+            flow_progress["running"] = False
             return
 
         if not raw_shipments:
             logger.info("No shipments found in DynamoDB. Nothing to process.")
             db.update_run_log(run_id, stats, errors, "success")
+            flow_progress["running"] = False
             return
 
         # ââ Step 2: Group by tenant ââ
+        flow_progress["phase"] = "grouping_by_tenant"
         logger.info("Step 2: Grouping shipments by tenant...")
         tenant_groups = defaultdict(list)
         for reserve in raw_shipments:
@@ -331,6 +363,7 @@ async def daily_flow(modules: dict):
                 logger.warning(f"Reserve {reserve.get('id', '?')} has no tenant ID")
 
         stats["tenants_found"] = len(tenant_groups)
+        flow_progress["tenant_total"] = len(tenant_groups)
         logger.info(f"Found {len(tenant_groups)} unique tenants: {list(tenant_groups.keys())}")
 
         # Count total active (non-delivered) packages across all tenants
@@ -340,43 +373,59 @@ async def daily_flow(modules: dict):
                     if pkg.get("status", "").lower() != "delivered":
                         total_active_packages += 1
 
-        # ââ Step 3: Authenticate with Odoo ââ
-        logger.info("Step 3: Authenticating with Odoo...")
-        odoo_ok = False
-        if odoo:
-            try:
-                odoo_ok = odoo.authenticate()
-                if not odoo_ok:
-                    raise RuntimeError("Odoo authentication returned False")
-            except Exception as e:
-                logger.error(f"Odoo authentication error: {e}")
-                errors.append({"step": "odoo_auth", "error": str(e)})
-                _alert_flow_error(
-                    whatsapp, None, "N/A", "Error autenticacion Odoo",
-                    str(e), total_active_packages, total_active_packages,
-                    "Todo el flujo diario se detuvo"
-                )
-                stats["alerts_sent"] += 1
-                db.update_run_log(run_id, stats, errors, "failed")
-                return
-        else:
-            logger.error("Odoo module not available")
+        flow_progress["packages_total"] = total_active_packages
+
+        # ââ Step 3: Load tenant_mapping from database ââ
+        flow_progress["phase"] = "loading_tenant_mapping"
+        logger.info("Step 3: Loading tenant_mapping from database...")
+        try:
+            tenant_mapping = db.get_tenant_mapping()
+            logger.info(f"Loaded {len(tenant_mapping)} tenant mappings")
+        except Exception as e:
+            logger.error(f"Error loading tenant_mapping: {e}")
+            errors.append({"step": "load_tenant_mapping", "error": str(e)})
             _alert_flow_error(
-                whatsapp, None, "N/A", "Modulo Odoo no disponible",
-                "OdooClient no inicializado. Verificar variables ODOO_*",
-                total_active_packages, total_active_packages,
+                whatsapp, None, "N/A", "Error cargando tenant_mapping",
+                str(e), total_active_packages, total_active_packages,
                 "Todo el flujo diario se detuvo"
             )
             stats["alerts_sent"] += 1
             db.update_run_log(run_id, stats, errors, "failed")
+            flow_progress["running"] = False
             return
 
         # ââ Step 4: Process each tenant ââ
+        flow_progress["phase"] = "processing_tenants"
         logger.info("Step 4: Processing tenants...")
-        for tenant_id, reserves in tenant_groups.items():
+        tenant_list = list(tenant_groups.items())
+        for tenant_index, (tenant_id, reserves) in enumerate(tenant_list):
+            flow_progress["tenant_index"] = tenant_index
+            flow_progress["tenant_current"] = str(tenant_id)
+
             try:
+                # Get tenant info from mapping
+                tenant_info = tenant_mapping.get(tenant_id)
+                if not tenant_info:
+                    logger.warning(f"Tenant #{tenant_id} not found in tenant_mapping!")
+                    tracking_numbers = []
+                    for reserve in reserves:
+                        for pkg in reserve.get("packages", []):
+                            tn = pkg.get("tracking_number", "")
+                            if tn:
+                                tracking_numbers.append(tn)
+                    _alert_tenant_not_found(whatsapp, tenant_id, tracking_numbers)
+                    stats["tenants_missing_mapping"] += 1
+                    stats["alerts_sent"] += 1
+                    continue
+
+                tenant_name = tenant_info.get("tenant_name", f"Tenant #{tenant_id}")
+                whatsapp_numbers = tenant_info.get("whatsapp_numbers", [])
+                stats["tenants_in_mapping"] += 1
+
                 await _process_tenant(
                     tenant_id=tenant_id,
+                    tenant_name=tenant_name,
+                    whatsapp_numbers=whatsapp_numbers,
                     reserves=reserves,
                     modules=modules,
                     stats=stats,
@@ -406,6 +455,7 @@ async def daily_flow(modules: dict):
                 stats["alerts_sent"] += 1
 
         # ââ Finalize ââ
+        flow_progress["phase"] = "finalizing"
         status = "success" if not errors else "partial"
         db.update_run_log(run_id, stats, errors, status)
         logger.info(f"=== Daily flow completed: {status} | Stats: {stats} ===")
@@ -417,7 +467,7 @@ async def daily_flow(modules: dict):
                 f"\U0001f4ca *SonIA Tracker \u2014 Resumen Diario*\n\n"
                 f"Estado: {'Parcial' if status == 'partial' else 'Fallido'}\n"
                 f"Errores: {len(errors)}\n"
-                f"Tenants procesados: {stats['tenants_in_odoo']}/{stats['tenants_found']}\n"
+                f"Tenants procesados: {stats['tenants_in_mapping']}/{stats['tenants_found']}\n"
                 f"Reportes enviados: {stats['reports_sent']}\n"
                 f"Alertas enviadas: {stats['alerts_sent']}\n\n"
                 f"\U0001f916 SonIA Tracker \u2014 {now_str}"
@@ -436,29 +486,50 @@ async def daily_flow(modules: dict):
             str(e), total_active_packages, total_active_packages,
             "Todo el flujo diario se detuvo"
         )
+    finally:
+        # Always clear running flag
+        flow_progress["running"] = False
+        flow_progress["phase"] = "idle"
 
 
-async def _process_tenant(tenant_id: int, reserves: List[Dict],
-                           modules: dict, stats: dict, errors: list,
+async def _process_tenant(tenant_id: int, tenant_name: str, whatsapp_numbers: List[str],
+                           reserves: List[Dict], modules: dict, stats: dict, errors: list,
                            total_active_packages: int):
     """
     Process all reserves for a single tenant:
-    1. Look up company in Odoo
-    2. Get WhatsApp contacts
-    3. Extract tracking numbers
-    4. Store in PostgreSQL
-    5. Query FedEx for active shipments
-    6. Detect anomalies
-    7. Generate and send report
+    1. Extract tracking numbers (skip delivered)
+    2. Store in PostgreSQL
+    3. Query FedEx for active shipments
+    4. Detect anomalies
+    5. Generate and send report
     """
+    global flow_progress
+
     db = modules.get("db")
     fedex = modules.get("fedex")
     anomaly_detector = modules.get("anomaly")
     report_gen = modules.get("reports")
     whatsapp = modules.get("whatsapp")
-    odoo = modules.get("odoo")
 
-    logger.info(f"--- Processing Tenant #{tenant_id} ({len(reserves)} reserves) ---")
+    logger.info(f"--- Processing Tenant #{tenant_id}: {tenant_name} ({len(reserves)} reserves) ---")
+    flow_progress["tenant_current"] = f"{tenant_name} (#{tenant_id})"
+
+    # ââ Get delivered tracking numbers from shipments table ââ
+    delivered_tracking = set()
+    try:
+        undelivered = db.get_undelivered_shipments()
+        # Complement set: all shipments minus undelivered = delivered
+        if undelivered:
+            all_tn = set()
+            for reserve in reserves:
+                for pkg in reserve.get("packages", []):
+                    tn = pkg.get("tracking_number", "")
+                    if tn:
+                        all_tn.add(tn)
+            undelivered_set = set(s.get("tracking_number") for s in undelivered if s.get("tracking_number"))
+            delivered_tracking = all_tn - undelivered_set
+    except Exception as e:
+        logger.warning(f"Could not load delivered shipments: {e}")
 
     # Collect all tracking numbers from packages
     all_tracking = []
@@ -468,54 +539,13 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
             tn = pkg.get("tracking_number", "")
             if tn:
                 all_tracking.append(tn)
-                if pkg.get("status", "").lower() != "delivered":
+                # Skip if already delivered
+                if tn not in delivered_tracking and pkg.get("status", "").lower() != "delivered":
                     active_tracking.append(tn)
 
-    logger.info(f"Tenant #{tenant_id}: {len(all_tracking)} total packages, {len(active_tracking)} active")
+    logger.info(f"Tenant #{tenant_id}: {len(all_tracking)} total packages, {len(active_tracking)} active, {len(delivered_tracking)} already delivered")
 
-    # ââ 4a: Look up company in Odoo ââ
-    company = odoo.find_company_by_tenant_number(
-        tenant_id, field_name=config.ODOO_TENANT_FIELD
-    )
-
-    if not company:
-        logger.warning(f"Tenant #{tenant_id} not found in Odoo!")
-        _alert_tenant_not_found(whatsapp, tenant_id, active_tracking or all_tracking)
-        stats["tenants_missing_odoo"] += 1
-        stats["alerts_sent"] += 1
-
-        # Still store shipments in PostgreSQL even without Odoo match
-        for reserve in reserves:
-            for pkg in reserve.get("packages", []):
-                tn = pkg.get("tracking_number", "")
-                if tn:
-                    try:
-                        db.upsert_shipment(
-                            tracking_number=tn,
-                            client_id=None,
-                            client_name_raw=f"Tenant #{tenant_id} (sin Odoo)",
-                            dynamo_data=reserve,
-                        )
-                    except Exception:
-                        pass
-        return
-
-    company_name = company.get("name", f"Tenant #{tenant_id}")
-    company_id = company["id"]
-    stats["tenants_in_odoo"] += 1
-    logger.info(f"Tenant #{tenant_id} -> Odoo company: {company_name} (ID: {company_id})")
-
-    # ââ 4b: Get WhatsApp contacts ââ
-    wa_contacts = odoo.get_whatsapp_contacts_for_company(company_id)
-
-    if not wa_contacts:
-        logger.warning(f"No WhatsApp contacts for {company_name} (Tenant #{tenant_id})")
-        _alert_no_whatsapp_contacts(whatsapp, company_name, tenant_id, len(active_tracking))
-        stats["tenants_no_whatsapp"] += 1
-        stats["alerts_sent"] += 1
-        # Continue processing (FedEx, anomalies) but won't send reports
-
-    # ââ 4c: Store shipments in PostgreSQL ââ
+    # ââ Store shipments in PostgreSQL ââ
     # Get or create client in DB
     client_info = db.get_client_by_tenant(tenant_id)
     client_db_id = client_info["id"] if client_info else None
@@ -529,7 +559,7 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
                 inserted = db.upsert_shipment(
                     tracking_number=tn,
                     client_id=client_db_id,
-                    client_name_raw=company_name,
+                    client_name_raw=tenant_name,
                     dynamo_data=reserve,
                 )
                 if inserted:
@@ -537,7 +567,14 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
             except Exception as e:
                 logger.error(f"DB upsert error for {tn}: {e}")
 
-    # ââ 4d: Query FedEx for active tracking numbers ââ
+    # Check if we have WhatsApp contacts
+    if not whatsapp_numbers:
+        logger.warning(f"No WhatsApp contacts for {tenant_name} (Tenant #{tenant_id})")
+        _alert_no_whatsapp_contacts(whatsapp, tenant_name, tenant_id, len(active_tracking))
+        stats["tenants_no_whatsapp"] += 1
+        stats["alerts_sent"] += 1
+
+    # ââ Query FedEx for active tracking numbers ââ
     if fedex and active_tracking:
         logger.info(f"Querying FedEx for {len(active_tracking)} active packages...")
         batch_size = 30
@@ -558,6 +595,7 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
                         stats["shipments_updated"] += 1
                         if fedex_data.get("is_delivered"):
                             stats["shipments_delivered"] += 1
+                            flow_progress["packages_done"] += 1
             except Exception as e:
                 logger.error(f"FedEx batch error for tenant #{tenant_id}: {e}")
                 errors.append({
@@ -566,14 +604,14 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
                     "batch_index": i,
                 })
                 _alert_flow_error(
-                    whatsapp, tenant_id, company_name,
+                    whatsapp, tenant_id, tenant_name,
                     "Error consultando FedEx",
                     str(e), len(batch), total_active_packages,
                     "Solo este cliente"
                 )
                 stats["alerts_sent"] += 1
 
-    # ââ 4e: Detect anomalies ââ
+    # ââ Detect anomalies ââ
     if anomaly_detector and client_db_id:
         try:
             client_shipments = db.get_shipments_by_client(client_db_id)
@@ -599,46 +637,44 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
                 "error": str(e),
             })
 
-    # ââ 4f: Generate report ââ
+    # ââ Generate report ââ
     if report_gen and client_db_id:
         try:
             client_shipments = db.get_shipments_by_client(client_db_id)
             if client_shipments:
                 report = report_gen.generate_client_report(
-                    client_name=company_name,
+                    client_name=tenant_name,
                     shipments=[dict(s) for s in client_shipments],
                 )
                 stats["reports_generated"] += 1
 
-                # ââ 4g: Send report via WhatsApp ââ
-                if whatsapp and wa_contacts:
-                    for contact in wa_contacts:
+                # ââ Send report via WhatsApp ââ
+                if whatsapp and whatsapp_numbers:
+                    for phone_number in whatsapp_numbers:
                         try:
                             sent = whatsapp.send_report_sync(
-                                phone_number=contact["whatsapp_number"],
+                                phone_number=phone_number,
                                 report_text=report,
-                                client_name=company_name,
+                                client_name=tenant_name,
                             )
                             if sent:
                                 stats["reports_sent"] += 1
                                 logger.info(
-                                    f"Report sent to {contact['name']} "
-                                    f"({contact['whatsapp_number']}) "
-                                    f"for {company_name}"
+                                    f"Report sent to {phone_number} for {tenant_name}"
                                 )
                         except Exception as e:
                             logger.error(
-                                f"WhatsApp send error to {contact['whatsapp_number']}: {e}"
+                                f"WhatsApp send error to {phone_number}: {e}"
                             )
                             errors.append({
                                 "step": f"whatsapp_send_tenant_{tenant_id}",
-                                "contact": contact["name"],
+                                "phone": phone_number,
                                 "error": str(e),
                             })
                             _alert_flow_error(
-                                whatsapp, tenant_id, company_name,
+                                whatsapp, tenant_id, tenant_name,
                                 "Error enviando reporte WhatsApp",
-                                f"Contacto: {contact['name']} - {str(e)}",
+                                f"Numero: {phone_number} - {str(e)}",
                                 len(active_tracking), total_active_packages,
                                 "Solo este cliente"
                             )
@@ -650,7 +686,7 @@ async def _process_tenant(tenant_id: int, reserves: List[Dict],
                 "error": str(e),
             })
 
-    logger.info(f"--- Tenant #{tenant_id} ({company_name}) processing complete ---")
+    logger.info(f"--- Tenant #{tenant_id} ({tenant_name}) processing complete ---")
 
 
 # ============================================================================
@@ -677,7 +713,7 @@ async def lifespan(app: FastAPI):
     # Schedule daily job
     run_hour = config.RUN_HOUR_COT
     scheduler.add_job(
-        daily_flow,
+        run_daily_flow,
         CronTrigger(hour=run_hour, minute=0, timezone=COT),
         args=[modules],
         id="daily_flow",
@@ -699,7 +735,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="SonIA Core",
     description="Daily Tracking Orchestrator - BloomsPal",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -714,7 +750,7 @@ async def root():
         "service": "SonIA Core",
         "status": "running",
         "environment": config.ENVIRONMENT,
-        "version": "1.1.0",
+        "version": "1.2.0",
     }
 
 
@@ -732,19 +768,9 @@ async def health():
         "status": "healthy" if db_ok else "degraded",
         "database": "connected" if db_ok else "disconnected",
         "modules": list(modules.keys()),
+        "flow_running": flow_progress["running"],
         "timestamp": datetime.now(COT).isoformat(),
     }
-
-
-@app.post("/run")
-async def trigger_run():
-    """Manually trigger the daily flow."""
-    if not modules:
-        raise HTTPException(status_code=503, detail="Modules not initialized")
-
-    import asyncio
-    asyncio.create_task(daily_flow(modules))
-    return {"message": "Daily flow triggered", "timestamp": datetime.now(COT).isoformat()}
 
 
 @app.get("/stats")
@@ -767,8 +793,124 @@ async def get_stats():
 
 
 # ============================================================================
+# PROGRESS & FLOW CONTROL ENDPOINTS
+# ============================================================================
+
+@app.get("/admin/progress")
+async def admin_progress():
+    """Get current flow progress state."""
+    return flow_progress
+
+
+@app.post("/admin/run-now")
+async def admin_run_now():
+    """Trigger the daily flow immediately as a background task."""
+    global flow_progress
+
+    if flow_progress["running"]:
+        raise HTTPException(status_code=409, detail="Flow is already running")
+
+    if not modules:
+        raise HTTPException(status_code=503, detail="Modules not initialized")
+
+    import asyncio
+    asyncio.create_task(run_daily_flow(modules))
+    return {"status": "started", "timestamp": datetime.now(COT).isoformat()}
+
+
+# ============================================================================
 # ADMIN ENDPOINTS
 # ============================================================================
+
+@app.post("/admin/sync-tenants")
+async def admin_sync_tenants(data: Dict[str, Any]):
+    """
+    Sync tenant data from spreadsheet into tenant_mapping and client_contacts.
+
+    Expected JSON body:
+    {
+        "tenant_names": {"1": "DIOS MIO COFFEE", "2": "EDEN FLOWERS", ...},
+        "tenant_contacts": {
+            "1": [{"name": "Carlos", "whatsapp": "573142285386"}, ...],
+            ...
+        }
+    }
+    """
+    db = modules.get("db")
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        tenant_names = data.get("tenant_names", {})
+        tenant_contacts = data.get("tenant_contacts", {})
+
+        if not tenant_names:
+            raise ValueError("tenant_names is required")
+
+        db.connect()
+
+        synced_count = 0
+        for tenant_id_str, tenant_name in tenant_names.items():
+            try:
+                tenant_id = int(tenant_id_str)
+
+                # Get or create client
+                client_info = db.get_client_by_tenant(tenant_id)
+                client_id = client_info["id"] if client_info else None
+
+                if not client_id:
+                    # Create new client
+                    db.cursor.execute("""
+                        INSERT INTO clients (name, dynamo_tenant_id, is_active)
+                        VALUES (%s, %s, TRUE)
+                        RETURNING id
+                    """, (tenant_name, tenant_id))
+                    result = db.cursor.fetchone()
+                    client_id = result["id"] if result else None
+
+                if not client_id:
+                    logger.warning(f"Could not create/find client for tenant {tenant_id}")
+                    continue
+
+                # Upsert tenant_mapping
+                db.cursor.execute("""
+                    INSERT INTO tenant_mapping (dynamo_tenant_id, tenant_name, client_id)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (dynamo_tenant_id) DO UPDATE
+                    SET tenant_name = EXCLUDED.tenant_name, client_id = EXCLUDED.client_id
+                    RETURNING id
+                """, (tenant_id, tenant_name, client_id))
+                db.conn.commit()
+
+                # Insert contacts if provided
+                contacts = tenant_contacts.get(tenant_id_str, [])
+                for contact in contacts:
+                    name = contact.get("name")
+                    whatsapp = contact.get("whatsapp")
+                    if name and whatsapp:
+                        db.cursor.execute("""
+                            INSERT INTO client_contacts (client_id, name, whatsapp_number, is_active)
+                            VALUES (%s, %s, %s, TRUE)
+                            ON CONFLICT (client_id, name) DO UPDATE
+                            SET whatsapp_number = EXCLUDED.whatsapp_number
+                        """, (client_id, name, whatsapp))
+                        db.conn.commit()
+
+                synced_count += 1
+            except Exception as e:
+                logger.error(f"Error syncing tenant {tenant_id_str}: {e}")
+                continue
+
+        db.close()
+        return {
+            "status": "success",
+            "tenants_synced": synced_count,
+            "total_tenants": len(tenant_names),
+        }
+    except Exception as e:
+        db.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/admin/dynamo-scan")
 async def admin_dynamo_scan():
@@ -910,10 +1052,16 @@ async def admin_test_flow(tenant_number: int = None):
     Run the daily flow for a single tenant (dry-run style test).
     If no tenant_number provided, reads DynamoDB and processes the first tenant found.
     """
+    global flow_progress
+
+    if flow_progress["running"]:
+        raise HTTPException(status_code=409, detail="Flow is already running")
+
     if not modules:
         raise HTTPException(status_code=503, detail="Modules not initialized")
 
     dynamo = modules.get("dynamo")
+    db = modules.get("db")
     if not dynamo:
         raise HTTPException(status_code=503, detail="DynamoDB not available")
 
@@ -951,12 +1099,18 @@ async def admin_test_flow(tenant_number: int = None):
             if p.get("status", "").lower() != "delivered"
         )
 
+        # Load tenant_mapping
+        tenant_mapping = db.get_tenant_mapping() if db else {}
+        tenant_info = tenant_mapping.get(target_tid, {})
+        tenant_name = tenant_info.get("tenant_name", f"Tenant #{target_tid}")
+        whatsapp_numbers = tenant_info.get("whatsapp_numbers", [])
+
         # Process just this tenant
         test_stats = {
             "total_shipments_read": len(raw_shipments),
             "tenants_found": len(tenant_groups),
-            "tenants_in_odoo": 0,
-            "tenants_missing_odoo": 0,
+            "tenants_in_mapping": 0,
+            "tenants_missing_mapping": 0,
             "tenants_no_whatsapp": 0,
             "new_shipments": 0,
             "shipments_checked": 0,
@@ -971,6 +1125,8 @@ async def admin_test_flow(tenant_number: int = None):
 
         await _process_tenant(
             tenant_id=target_tid,
+            tenant_name=tenant_name,
+            whatsapp_numbers=whatsapp_numbers,
             reserves=reserves,
             modules=modules,
             stats=test_stats,
@@ -981,9 +1137,11 @@ async def admin_test_flow(tenant_number: int = None):
         return {
             "status": "completed",
             "tenant_processed": target_tid,
+            "tenant_name": tenant_name,
             "reserves_count": len(reserves),
             "total_packages": total_pkgs,
             "active_packages": active_pkgs,
+            "whatsapp_numbers": whatsapp_numbers,
             "stats": test_stats,
             "errors": test_errors,
         }
@@ -1018,8 +1176,8 @@ async def admin_seed_data():
 
         # 2. Insert tenant_mapping
         db.cursor.execute("""
-            INSERT INTO tenant_mapping (dynamo_tenant_id, client_id)
-            VALUES (1, %s)
+            INSERT INTO tenant_mapping (dynamo_tenant_id, client_id, tenant_name)
+            VALUES (1, %s, 'BloomsPal')
             ON CONFLICT (dynamo_tenant_id) DO NOTHING
             RETURNING *
         """, (client_id,))
