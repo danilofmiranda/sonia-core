@@ -380,17 +380,47 @@ async def run_daily_flow(modules: dict):
 
         flow_progress["packages_total"] = total_active_packages
 
-        # ââ Step 3: Load tenant_mapping from database ââ
-        flow_progress["phase"] = "loading_tenant_mapping"
-        logger.info("Step 3: Loading tenant_mapping from database...")
+        #  Step 3: Load tenant data from Odoo spreadsheet 
+        flow_progress["phase"] = "loading_odoo_spreadsheet"
+        logger.info("Step 3: Loading tenant data from Odoo WhatsApp BBDD spreadsheet...")
+        odoo = modules.get("odoo")
         try:
-            tenant_mapping = db.get_tenant_mapping()
-            logger.info(f"Loaded {len(tenant_mapping)} tenant mappings")
+            if not odoo:
+                raise Exception("Odoo module not available")
+
+            auth_ok = odoo.authenticate()
+            if not auth_ok:
+                raise Exception("Odoo authentication failed")
+
+            bbdd = odoo.get_whatsapp_bbdd(config.ODOO_SPREADSHEET_ID)
+            odoo_tenant_names = bbdd.get("tenant_mapping", {})
+            odoo_contacts = bbdd.get("contacts", [])
+
+            if not odoo_tenant_names:
+                raise Exception(f"No tenant mappings found in spreadsheet {config.ODOO_SPREADSHEET_ID}")
+
+            # Build tenant_mapping in expected format:
+            # {tenant_id: {"tenant_name": name, "whatsapp_numbers": [...]}}
+            tenant_mapping = {}
+            for tid, tname in odoo_tenant_names.items():
+                whatsapp_nums = [
+                    c["whatsapp"] for c in odoo_contacts
+                    if c.get("tenant_number") == tid and c.get("whatsapp")
+                ]
+                tenant_mapping[tid] = {
+                    "tenant_name": tname,
+                    "whatsapp_numbers": whatsapp_nums,
+                }
+
+            logger.info(
+                f"Loaded {len(tenant_mapping)} tenant mappings from Odoo, "
+                f"{len(odoo_contacts)} contacts from Hoja 1"
+            )
         except Exception as e:
-            logger.error(f"Error loading tenant_mapping: {e}")
-            errors.append({"step": "load_tenant_mapping", "error": str(e)})
+            logger.error(f"Error loading Odoo spreadsheet: {e}")
+            errors.append({"step": "load_odoo_spreadsheet", "error": str(e)})
             _alert_flow_error(
-                whatsapp, None, "N/A", "Error cargando tenant_mapping",
+                whatsapp, None, "N/A", "Error leyendo spreadsheet Odoo",
                 str(e), total_active_packages, total_active_packages,
                 "Todo el flujo diario se detuvo"
             )
