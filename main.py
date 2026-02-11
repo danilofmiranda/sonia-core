@@ -33,6 +33,7 @@ from modules.anomaly_detector import AnomalyDetector
 from modules.report_generator import ReportGenerator
 from modules.whatsapp_sender import WhatsAppSender
 from modules.odoo_client import OdooClient
+from modules.excel_generator import ExcelReportGenerator
 
 # ââ Logging ââ
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -166,6 +167,10 @@ def init_modules():
             password=config.ODOO_PASSWORD,
         )
         logger.info("OdooClient initialized")
+
+    # Excel Report Generator
+    mods["excel_gen"] = ExcelReportGenerator()
+    logger.info("ExcelReportGenerator initialized")
 
     return mods
 
@@ -489,6 +494,40 @@ async def run_daily_flow(modules: dict):
                 )
                 stats["alerts_sent"] += 1
 
+        # ── Generate consolidated Excel report ──
+        excel_gen = modules.get("excel_gen")
+        if excel_gen and db:
+            try:
+                all_shipments = {}
+                for tid, reserves in tenant_groups.items():
+                    t_info = tenant_mapping.get(tid)
+                    if t_info:
+                        t_name = t_info.get("tenant_name", f"Tenant #{tid}")
+                        client_db_id = t_info.get("client_db_id")
+                        if client_db_id:
+                            rows = db.get_shipments_by_client(client_db_id)
+                            if rows:
+                                all_shipments[t_name] = [dict(r) for r in rows]
+                if all_shipments:
+                    consolidated_path = excel_gen.generate_consolidated_report(all_shipments)
+                    if consolidated_path:
+                        stats["consolidated_excel"] = consolidated_path
+                        logger.info(f"Consolidated Excel report: {consolidated_path}")
+                        # Send consolidated to admin
+                        if whatsapp and config.ADMIN_WHATSAPP:
+                            try:
+                                whatsapp.send_file_sync(
+                                    phone_number=config.ADMIN_WHATSAPP,
+                                    file_path=consolidated_path,
+                                    caption="SonIA Tracker - Reporte Consolidado",
+                                )
+                                logger.info("Consolidated Excel sent to admin")
+                            except Exception as e:
+                                logger.error(f"Error sending consolidated Excel: {e}")
+            except Exception as e:
+                logger.error(f"Error generating consolidated Excel: {e}")
+
+
         # ââ Finalize ââ
         flow_progress["phase"] = "finalizing"
         status = "success" if not errors else "partial"
@@ -720,6 +759,38 @@ async def _process_tenant(tenant_id: int, tenant_name: str, whatsapp_numbers: Li
                 "step": f"report_gen_tenant_{tenant_id}",
                 "error": str(e),
             })
+
+
+    # ── Generate Excel report per tenant ──
+    excel_gen = modules.get("excel_gen")
+    if excel_gen and client_db_id:
+        try:
+            client_shipments_for_excel = db.get_shipments_by_client(client_db_id)
+            if client_shipments_for_excel:
+                shipment_dicts_excel = [dict(s) for s in client_shipments_for_excel]
+                excel_path = excel_gen.generate_tenant_report(
+                    tenant_name=tenant_name,
+                    shipments=shipment_dicts_excel,
+                )
+                if excel_path:
+                    stats["excel_reports_generated"] = stats.get("excel_reports_generated", 0) + 1
+                    logger.info(f"Excel report generated for {tenant_name}: {excel_path}")
+
+                    # Send Excel via WhatsApp to tenant contacts
+                    if whatsapp and whatsapp_numbers:
+                        for phone_number in whatsapp_numbers:
+                            try:
+                                sent = whatsapp.send_file_sync(
+                                    phone_number=phone_number,
+                                    file_path=excel_path,
+                                    caption=f"SonIA Tracker - Reporte {tenant_name}",
+                                )
+                                if sent:
+                                    stats["excel_reports_sent"] = stats.get("excel_reports_sent", 0) + 1
+                            except Exception as e:
+                                logger.error(f"Error sending Excel to {phone_number}: {e}")
+        except Exception as e:
+            logger.error(f"Excel generation error for tenant #{tenant_id}: {e}")
 
     logger.info(f"--- Tenant #{tenant_id} ({tenant_name}) processing complete ---")
 
