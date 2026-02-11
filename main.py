@@ -47,7 +47,7 @@ COT = timezone(timedelta(hours=-5))
 # ============================================================================
 
 def run_migration():
-    """Auto-run SQL migrations on startup."""
+    """Auto-run SQL migrations on startup. Runs each file independently."""
     db_url = os.getenv("DATABASE_URL", "")
     if not db_url:
         logger.warning("No DATABASE_URL - skipping migration")
@@ -58,14 +58,20 @@ def run_migration():
         conn.autocommit = True
         cur = conn.cursor()
 
-        migration_file = os.path.join(os.path.dirname(__file__), "migrations", "001_initial_schema.sql")
-        if os.path.exists(migration_file):
-            with open(migration_file, "r") as f:
-                sql = f.read()
-            cur.execute(sql)
-            logger.info("Migration 001 applied successfully")
+        migrations_dir = os.path.join(os.path.dirname(__file__), "migrations")
+        if os.path.isdir(migrations_dir):
+            for fname in sorted(os.listdir(migrations_dir)):
+                if fname.endswith(".sql"):
+                    fpath = os.path.join(migrations_dir, fname)
+                    try:
+                        with open(fpath, "r") as f:
+                            sql = f.read()
+                        cur.execute(sql)
+                        logger.info(f"Migration {fname} applied successfully")
+                    except Exception as me:
+                        logger.warning(f"Migration {fname} note: {me}")
         else:
-            logger.warning(f"Migration file not found: {migration_file}")
+            logger.warning(f"Migrations dir not found: {migrations_dir}")
 
         cur.close()
         conn.close()
