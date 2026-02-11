@@ -257,24 +257,29 @@ class OdooClient:
             "sheets_found": [s.get("name") for s in sheets],
         }
 
+    @staticmethod
+    def _cell_value(cells: Dict, key: str) -> str:
+        """Extract cell value - handles both dict and string cell formats."""
+        raw = cells.get(key, "")
+        if isinstance(raw, dict):
+            return str(raw.get("content", raw.get("value", ""))).strip()
+        return str(raw).strip() if raw else ""
+
     def _parse_tenant_mapping(self, cells: Dict) -> Dict[int, str]:
         """Parse Hoja 2 cells: tenant_number (col A) -> client_name (col B)."""
         mapping = {}
         row = 2  # Skip header row
         while row < 100:
-            tenant_cell = cells.get(f"A{row}", {})
-            client_cell = cells.get(f"B{row}", {})
-            tenant_val = tenant_cell.get("content", "")
-            client_val = client_cell.get("content", "")
+            tenant_val = self._cell_value(cells, f"A{row}")
+            client_val = self._cell_value(cells, f"B{row}")
 
             if not tenant_val and not client_val:
                 break
 
             try:
-                tenant_num = int(str(tenant_val).strip())
-                client_name = str(client_val).strip()
-                if client_name:
-                    mapping[tenant_num] = client_name
+                tenant_num = int(tenant_val)
+                if client_val:
+                    mapping[tenant_num] = client_val
             except (ValueError, TypeError):
                 pass
             row += 1
@@ -287,32 +292,32 @@ class OdooClient:
         contacts = []
         row = 2  # Skip header
         while row < 200:
-            cliente = cells.get(f"A{row}", {}).get("content", "")
-            nombre = cells.get(f"B{row}", {}).get("content", "")
-            nickname = cells.get(f"C{row}", {}).get("content", "")
-            whatsapp = cells.get(f"D{row}", {}).get("content", "")
-            rol = cells.get(f"E{row}", {}).get("content", "")
-            clave = cells.get(f"F{row}", {}).get("content", "")
-            bloqueo = cells.get(f"G{row}", {}).get("content", "")
-            tenant_num = cells.get(f"H{row}", {}).get("content", "")
+            cliente = self._cell_value(cells, f"A{row}")
+            nombre = self._cell_value(cells, f"B{row}")
+            nickname = self._cell_value(cells, f"C{row}")
+            whatsapp = self._cell_value(cells, f"D{row}")
+            rol = self._cell_value(cells, f"E{row}")
+            clave = self._cell_value(cells, f"F{row}")
+            bloqueo = self._cell_value(cells, f"G{row}")
+            tenant_num = self._cell_value(cells, f"H{row}")
 
             if not cliente and not nombre and not whatsapp:
                 break
 
             contact = {
-                "cliente": str(cliente).strip(),
-                "nombre_usuario": str(nombre).strip(),
-                "nickname": str(nickname).strip(),
-                "whatsapp": self._clean_phone(str(whatsapp).strip()),
-                "rol": str(rol).strip(),
-                "clave": str(clave).strip(),
-                "bloqueo": str(bloqueo).strip(),
+                "cliente": cliente,
+                "nombre_usuario": nombre,
+                "nickname": nickname,
+                "whatsapp": self._clean_phone(whatsapp),
+                "rol": rol,
+                "clave": clave,
+                "bloqueo": bloqueo,
                 "tenant_number": None,
             }
 
             if tenant_num:
                 try:
-                    contact["tenant_number"] = int(str(tenant_num).strip())
+                    contact["tenant_number"] = int(tenant_num)
                 except (ValueError, TypeError):
                     pass
 
