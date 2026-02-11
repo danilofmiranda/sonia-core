@@ -630,12 +630,12 @@ async def _process_tenant(tenant_id: int, tenant_name: str, whatsapp_numbers: Li
             if not tn:
                 continue
             try:
-                inserted = db.upsert_shipment(
-                    tracking_number=tn,
-                    client_id=client_db_id,
-                    client_name_raw=tenant_name,
-                    dynamo_data=reserve,
-                )
+                inserted = db.upsert_shipment({
+                    "tracking_number": tn,
+                    "client_id": client_db_id,
+                    "client_name_raw": tenant_name,
+                    "dynamo_data": reserve,
+                })
                 if inserted:
                     stats["new_shipments"] += 1
             except Exception as e:
