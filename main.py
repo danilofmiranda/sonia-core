@@ -1,4 +1,4 @@
-undefined"""
+"""
 SonIA Core - Daily Tracking Orchestrator
 BloomsPal / Fase 1
 
