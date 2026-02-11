@@ -568,7 +568,7 @@ class DBManager:
                 data.get("auto_detection_rule")
             ))
 
-            claim_id = self.cursor.fetchone()[0]
+            claim_id = self.cursor.fetchone()['id']
             self.conn.commit()
 
             logger.info(f"Claim created: id={claim_id}, tracking_number={data.get('tracking_number')}")
@@ -694,7 +694,7 @@ class DBManager:
                 "running"
             ))
 
-            run_id = self.cursor.fetchone()[0]
+            run_id = self.cursor.fetchone()['id']
             self.conn.commit()
 
             logger.info(f"Run started: run_id={run_id}, run_date={run_date}")
