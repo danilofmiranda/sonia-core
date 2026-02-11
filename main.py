@@ -1057,6 +1057,48 @@ async def admin_test_odoo(tenant_number: int = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/admin/test-spreadsheet")
+async def admin_test_spreadsheet():
+    """
+    Test reading the WhatsApp BBDD spreadsheet from Odoo Documents.
+    Tries multiple approaches and returns diagnostic info.
+    """
+    odoo = modules.get("odoo")
+    if not odoo:
+        raise HTTPException(status_code=503, detail="Odoo module not available")
+
+    try:
+        auth_ok = odoo.authenticate()
+        if not auth_ok:
+            return {"status": "error", "detail": "Odoo authentication failed"}
+
+        doc_id = config.ODOO_SPREADSHEET_ID
+
+        # Step 1: Diagnostic - test access approaches
+        diagnostic = odoo.test_spreadsheet_access(doc_id)
+
+        # Step 2: Try to read and parse the spreadsheet
+        parsed = None
+        try:
+            bbdd = odoo.get_whatsapp_bbdd(doc_id)
+            parsed = {
+                "tenant_mapping": {str(k): v for k, v in bbdd.get("tenant_mapping", {}).items()},
+                "contacts_count": len(bbdd.get("contacts", [])),
+                "contacts": bbdd.get("contacts", []),
+            }
+        except Exception as e:
+            parsed = {"error": str(e)}
+
+        return {
+            "status": "ok",
+            "spreadsheet_id": doc_id,
+            "diagnostic": diagnostic,
+            "parsed_data": parsed,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/admin/test-flow")
 async def admin_test_flow(tenant_number: int = None):
     """
