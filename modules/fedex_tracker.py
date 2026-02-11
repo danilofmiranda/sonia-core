@@ -302,9 +302,10 @@ class FedExTracker:
             estimated_delivery = tracking_summary.get("estimatedDeliveryTimestamp")
 
             parsed = {
-                "status": sonia_status,
-                "status_detail": status_description,
-                "estimated_delivery": estimated_delivery,
+                "sonia_status": sonia_status,
+                "fedex_status": status_description,
+                "estimated_delivery_date": estimated_delivery,
+                "is_delivered": sonia_status == "delivered",
                 "latest_event": {
                     "date": latest_event.get("scanEventDate"),
                     "time": latest_event.get("scanEventTime"),
@@ -315,7 +316,7 @@ class FedExTracker:
                     },
                     "description": latest_event.get("eventDescription"),
                 } if track_details else {},
-                "raw_response": result,
+                "raw_fedex_response": result,
             }
 
             return parsed
