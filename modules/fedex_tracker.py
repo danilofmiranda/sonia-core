@@ -10,7 +10,6 @@ import json
 import time
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -226,24 +225,27 @@ class FedExTracker:
         return results
 
     def _track_batch_request(self, tracking_numbers: List[str]) -> Dict[str, Any]:
-        """Make a single batch tracking request to FedEx API."""
+        """Make a single batch tracking request to FedEx Track API v1 (POST)."""
         try:
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type": "application/json",
             }
 
-            # Build query string
-            query_params = {
-                "trackingNumberInfo": ",".join(tracking_numbers),
-                "includeDetailedScans": "true"
+            # Build JSON payload per FedEx Track API v1 spec
+            payload = {
+                "trackingInfo": [
+                    {"trackingNumberInfo": {"trackingNumber": tn}}
+                    for tn in tracking_numbers
+                ],
+                "includeDetailedScans": True
             }
 
-            url = f"{self.track_url}?{urlencode(query_params)}"
+            logger.info(f"Tracking batch of {len(tracking_numbers)} packages via POST")
 
-            logger.info(f"Tracking batch of {len(tracking_numbers)} packages")
-
-            response = self._request_with_retry("GET", url, headers=headers)
+            response = self._request_with_retry(
+                "POST", self.track_url, headers=headers, json_data=payload
+            )
 
             results = {}
 
@@ -257,11 +259,11 @@ class FedExTracker:
                         parsed = self._parse_tracking_result(result)
                         results[tn] = parsed
             else:
-                logger.warning(f"Tracking request failed: {response.status_code}")
+                logger.warning(f"Tracking request failed: {response.status_code} - {response.text[:500]}")
                 for tn in tracking_numbers:
                     results[tn] = {
                         "error": f"API returned {response.status_code}",
-                        "raw_response": response.text
+                        "raw_response": response.text[:1000]
                     }
 
             return results
@@ -272,54 +274,77 @@ class FedExTracker:
 
     def _parse_tracking_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Parse a FedEx tracking result into normalized format.
+        Parse a FedEx Track API v1 tracking result into normalized format.
 
         Args:
-            result: Raw FedEx API tracking result
+            result: Raw FedEx API completeTrackResults item
 
         Returns:
             Parsed result dict with normalized status
         """
         try:
             tn = result.get("trackingNumber")
-            tracking_summary = result.get("trackingSummary", {})
-            status_code = tracking_summary.get("status")
-            status_description = tracking_summary.get("statusDescription", "")
 
-            # Find latest event for more details
-            latest_event = {}
-            track_details = result.get("trackingDetails", [])
-            if track_details:
-                latest_event = track_details[0]
+            # FedEx Track API v1 nests results in trackResults array
+            track_results = result.get("trackResults", [])
+            if not track_results:
+                return {
+                    "sonia_status": "unknown",
+                    "fedex_status": "No track results",
+                    "estimated_delivery_date": None,
+                    "is_delivered": False,
+                    "latest_event": {},
+                    "raw_fedex_response": result,
+                }
+
+            track_detail = track_results[0]
+
+            # Extract status from latestStatusDetail
+            latest_status = track_detail.get("latestStatusDetail", {})
+            status_code = latest_status.get("code", "")
+            status_description = latest_status.get("description", "")
 
             # Normalize status
             sonia_status = get_sonia_status(status_code, status_description)
 
-            # Extract estimated delivery date if available
-            estimated_delivery = tracking_summary.get("estimatedDeliveryTimestamp")
+            # Extract estimated delivery from dateAndTimes array
+            estimated_delivery = None
+            date_times = track_detail.get("dateAndTimes", [])
+            for dt in date_times:
+                if dt.get("type") in ["ESTIMATED_DELIVERY", "ESTIMATED_DELIVERY_TIMESTAMP"]:
+                    estimated_delivery = dt.get("dateTime")
+                    break
+
+            # Extract latest scan event
+            latest_event = {}
+            scan_events = track_detail.get("scanEvents", [])
+            if scan_events:
+                event = scan_events[0]
+                scan_location = event.get("scanLocation", {})
+                latest_event = {
+                    "date": event.get("date"),
+                    "time": event.get("date"),
+                    "location": {
+                        "city": scan_location.get("city"),
+                        "state": scan_location.get("stateOrProvinceCode"),
+                        "country": scan_location.get("countryCode"),
+                    },
+                    "description": event.get("eventDescription"),
+                }
 
             parsed = {
                 "sonia_status": sonia_status,
-                "fedex_status": status_description,
+                "fedex_status": status_description or latest_status.get("statusByLocale", ""),
                 "estimated_delivery_date": estimated_delivery,
                 "is_delivered": sonia_status == "delivered",
-                "latest_event": {
-                    "date": latest_event.get("scanEventDate"),
-                    "time": latest_event.get("scanEventTime"),
-                    "location": {
-                        "city": latest_event.get("scanLocation", {}).get("city"),
-                        "state": latest_event.get("scanLocation", {}).get("stateOrProvinceCode"),
-                        "country": latest_event.get("scanLocation", {}).get("countryCode"),
-                    },
-                    "description": latest_event.get("eventDescription"),
-                } if track_details else {},
+                "latest_event": latest_event,
                 "raw_fedex_response": result,
             }
 
             return parsed
 
         except Exception as e:
-            logger.error(f"Error parsing tracking result for {tn}: {e}")
+            logger.error(f"Error parsing tracking result for {result.get('trackingNumber')}: {e}")
             return {
                 "error": f"Parse error: {str(e)}",
                 "raw_response": result
