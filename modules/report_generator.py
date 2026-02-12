@@ -6,6 +6,7 @@ Generates per-client tracking reports for WhatsApp delivery.
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
@@ -19,61 +20,60 @@ class ReportGenerator:
     def generate_client_report(client_name: str, shipments: List[Dict]) -> str:
         """
         Generate a WhatsApp-friendly text report for a client.
-        Includes all their shipments (delivered and in-transit).
+        Short summary with status counts + Excel attachment note.
         """
         now = datetime.now(COT)
         date_str = now.strftime("%d/%m/%Y")
         time_str = now.strftime("%I:%M %p")
 
-        # Separate delivered vs active
-        delivered = [s for s in shipments if s.get("is_delivered")]
-        active = [s for s in shipments if not s.get("is_delivered")]
+        # Count by status
+        status_counts = Counter()
+        for s in shipments:
+            status = s.get("sonia_status", "unknown")
+            status_counts[status] += 1
+
+        total = len(shipments)
 
         # Build report
         lines = []
         lines.append(f"📦 *Reporte de Envíos — {client_name}*")
         lines.append(f"📅 {date_str} | ⏰ {time_str} COT")
-        lines.append(f"━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"Total guías: {len(shipments)} | ✅ Entregadas: {len(delivered)} | 🚚 Activas: {len(active)}")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"Total guías: {total}")
         lines.append("")
+        lines.append("📊 *Resumen por estado:*")
 
-        # Active shipments first (most important)
-        if active:
-            lines.append("🚚 *ENVÍOS ACTIVOS:*")
-            lines.append("")
-            for s in active:
-                status_emoji = ReportGenerator._status_emoji(s.get("sonia_status", "unknown"))
-                lines.append(f"{status_emoji} *{s.get('tracking_number', 'N/A')}*")
-                lines.append(f"   Estado: {ReportGenerator._status_display(s.get('sonia_status', 'unknown'))}")
-                if s.get("fedex_status"):
-                    lines.append(f"   FedEx: {s['fedex_status']}")
-                if s.get("ship_date"):
-                    lines.append(f"   Enviado: {s['ship_date']}")
-                if s.get("destination_city"):
-                    dest = s["destination_city"]
-                    if s.get("destination_state"):
-                        dest += f", {s['destination_state']}"
-                    lines.append(f"   Destino: {dest}")
-                lines.append("")
+        # Status display order and emojis
+        status_order = [
+            ("delivered", "✅", "Entregado"),
+            ("in_transit", "🚚", "En Tránsito"),
+            ("label_created", "🏷️", "Label Creada"),
+            ("picked_up", "📥", "Recogido"),
+            ("in_customs", "🛃", "En Aduanas"),
+            ("out_for_delivery", "🏃", "En camino para entrega"),
+            ("exception", "🔴", "Excepción"),
+            ("delayed", "🟠", "Retrasado"),
+            ("on_hold", "⏸️", "En espera"),
+            ("delivery_attempted", "🟡", "Intento de entrega"),
+            ("returned_to_sender", "↩️", "Devuelto a origen"),
+            ("cancelled", "❌", "Cancelado"),
+            ("unknown", "❓", "Desconocido"),
+        ]
 
-        # Delivered summary (compact)
-        if delivered:
-            lines.append(f"✅ *ENTREGADAS ({len(delivered)}):*")
-            lines.append("")
-            for s in delivered[:10]:  # Show first 10
-                lines.append(f"   ✅ {s.get('tracking_number', 'N/A')} — {s.get('delivery_date', 'N/A')}")
-            if len(delivered) > 10:
-                lines.append(f"   ... y {len(delivered) - 10} más")
-            lines.append("")
+        for status_key, emoji, display_name in status_order:
+            count = status_counts.get(status_key, 0)
+            if count > 0:
+                lines.append(f"{emoji} {display_name}: {count}")
 
+        lines.append("")
+        lines.append("📎 _Excel adjunto con detalle completo_")
         lines.append("━━━━━━━━━━━━━━━━━━━━━")
         lines.append("🤖 _Generado por SonIA Tracker — BloomsPal_")
 
         return "\n".join(lines)
 
     @staticmethod
-    def generate_admin_inconsistency_alert(client_name: str, tenant_id: int,
-                                            pending_count: int) -> str:
+    def generate_admin_inconsistency_alert(client_name: str, tenant_id: int, pending_count: int) -> str:
         """Generate an alert message for admin when client not found in Odoo."""
         return (
             f"⚠️ *Inconsistencia detectada*\n\n"
@@ -95,9 +95,7 @@ class ReportGenerator:
             "customs_too_long": "🟠 Demasiado tiempo en aduanas",
             "label_no_movement": "🟡 Label sin movimiento",
         }
-
         rule_desc = rule_descriptions.get(rule, rule)
-
         msg = (
             f"🚨 *Anomalía detectada*\n\n"
             f"Guía: *{tracking_number}*\n"
@@ -107,7 +105,6 @@ class ReportGenerator:
         if details:
             msg += f"Detalle: {details}\n"
         msg += f"\n📋 Se creó reclamo automático en el Portal."
-
         return msg
 
     @staticmethod
