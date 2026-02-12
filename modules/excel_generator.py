@@ -183,7 +183,12 @@ class ExcelReportGenerator:
         working_days = self._calc_working_days_text(ship_date, delivery_date, now, is_delivered)
         days_after_label = self._calc_days_text(label_date, delivery_date, now, is_delivered)
 
-        historial = self._format_scan_events(s.get("scan_events"))
+        # Try to get scan_events directly, or extract from raw_fedex_response
+        scan_events = s.get("scan_events")
+        if not scan_events and s.get("raw_fedex_response"):
+            scan_events = self._extract_scan_events_from_raw(s.get("raw_fedex_response"))
+        historial = self._format_scan_events(scan_events)
+
         recomendacion = self._generate_recommendation(
             sonia_status, ship_date, delivery_date, now, is_delivered
         )
@@ -212,7 +217,7 @@ class ExcelReportGenerator:
         if is_delivered:
             for col in range(1, len(HEADERS) + 1):
                 ws.cell(row=row, column=col).fill = DELIVERED_FILL
-        elif sonia_status in ("exception", "returned", "customs_hold"):
+        elif sonia_status in ("exception", "returned_to_sender"):
             for col in range(1, len(HEADERS) + 1):
                 ws.cell(row=row, column=col).fill = ALERT_FILL
 
@@ -280,6 +285,39 @@ class ExcelReportGenerator:
             return f"{bdays} DIAS HABILES EN TRANSITO"
 
     @staticmethod
+    def _extract_scan_events_from_raw(raw_response) -> list:
+        """Extract scan events from raw FedEx API response stored in DB."""
+        if not raw_response:
+            return []
+        if isinstance(raw_response, str):
+            import json
+            try:
+                raw_response = json.loads(raw_response)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        # Navigate the FedEx response structure
+        # raw_fedex_response stores the completeTrackResults item
+        track_results = raw_response.get("trackResults", [])
+        if not track_results:
+            # Maybe it's the full response
+            complete = raw_response.get("output", {}).get("completeTrackResults", [])
+            if complete:
+                track_results = complete[0].get("trackResults", [])
+        if not track_results:
+            return []
+        scan_events = track_results[0].get("scanEvents", [])
+        # Format to standard event format (first 5)
+        formatted = []
+        for evt in scan_events[:5]:
+            entry = {
+                "date": evt.get("date", "")[:10] if evt.get("date") else "",
+                "description": evt.get("eventDescription", ""),
+                "city": evt.get("scanLocation", {}).get("city", "") if evt.get("scanLocation") else "",
+            }
+            formatted.append(entry)
+        return formatted
+
+    @staticmethod
     def _format_scan_events(scan_events) -> str:
         """Format scan_events JSONB into readable history string."""
         if not scan_events:
@@ -321,32 +359,48 @@ class ExcelReportGenerator:
         status: str, ship_date: Optional[date], delivery_date: Optional[date],
         today: date, is_delivered: bool
     ) -> str:
-        """Generate SonIA recommendation based on status and timing."""
+        """Generate SonIA recommendation matching SonIA Tracker logic."""
         if is_delivered and delivery_date and ship_date:
             days = (delivery_date - ship_date).days
-            if days <= 7:
+            if days <= 2:
+                return "Excelente tiempo de entrega! Paquete llego rapido."
+            elif days <= 5:
                 return "Buen tiempo de entrega dentro de lo esperado."
-            elif days <= 14:
-                return "Entrega dentro de rango aceptable."
             else:
-                return f"Entrega demorada ({days} dias). Revisar con FedEx si hay patron."
+                return "Entrega tomo mas tiempo de lo usual."
+
+        if is_delivered:
+            return "Paquete entregado exitosamente."
 
         if not ship_date:
+            if status in ("label_created",):
+                return "Esperando recogida de FedEx."
             return "Sin fecha de envio registrada."
 
         transit_days = (today - ship_date).days
 
-        if status in ("exception", "delivery_exception"):
-            return "ATENCION: Excepcion de entrega. Contactar FedEx inmediatamente."
-        elif status in ("returned", "returned_to_sender"):
+        if status in ("exception",):
+            return "ACCION REQUERIDA: Paquete tiene una excepcion. Contactar FedEx."
+        elif status in ("returned_to_sender",):
             return "CRITICO: Paquete devuelto a origen. Accion inmediata requerida."
-        elif status in ("customs_hold", "customs"):
-            return "En retencion de aduana. Monitorear y preparar documentacion."
-        elif transit_days > 21:
-            return f"ALERTA: {transit_days} dias en transito. Posible perdida. Abrir reclamo."
-        elif transit_days > 14:
-            return f"Atencion: {transit_days} dias en transito. Monitorear de cerca."
+        elif status in ("in_customs",):
+            return "Paquete en proceso de aduana. Puede tomar varios dias."
+        elif status == "out_for_delivery":
+            return "Paquete en camino para entrega hoy!"
+        elif status == "on_hold":
+            return "ACCION REQUERIDA: Paquete en espera. Contactar FedEx."
+        elif status == "delayed":
+            return f"ATENCION: Paquete retrasado. Monitorear de cerca."
+        elif status == "label_created":
+            if transit_days > 5:
+                return f"ATENCION: {transit_days} dias desde que se creo la etiqueta. Contactar al remitente."
+            elif transit_days > 2:
+                return "Etiqueta creada pero aun no recogida. Verificar con remitente."
+            else:
+                return "Recien creada. Esperando recogida de FedEx."
         elif transit_days > 7:
-            return "En transito, dentro de rango normal para envio internacional."
+            return f"ATENCION: {transit_days} dias en transito. Verificar retrasos."
+        elif transit_days > 4:
+            return "Tiempo de transito extendido. Posible retraso en aduana."
         else:
-            return "En transito, tiempo normal."
+            return "Paquete moviendose normalmente en red FedEx."
