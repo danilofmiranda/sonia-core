@@ -154,18 +154,15 @@ class FedExTracker:
         try:
             logger.info("Authenticating with FedEx OAuth2...")
 
-            # Prepare auth request
-            auth_string = f"{self.client_id}:{self.client_secret}"
-            import base64
-            encoded_auth = base64.b64encode(auth_string.encode()).decode()
-
+            # Prepare auth request - FedEx expects credentials in POST body
             headers = {
-                "Authorization": f"Basic {encoded_auth}",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
 
             data = {
-                "grant_type": "client_credentials"
+                "grant_type": "client_credentials",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
             }
 
             # Request token with retry logic
